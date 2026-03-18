@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Synced Video (Stable)</title>
+  <title>Synced Video (Final Stable)</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
@@ -31,7 +31,7 @@ let latencySamples = [];
 let latency = 0;
 let timeOffset = 0;
 let lastHostState = null;
-let lastActionTime = 0;
+let playLockUntil = 0;
 
 // ---------------- HOST ----------------
 function createServer() {
@@ -107,7 +107,6 @@ function joinServer(codeOverride=null) {
 
     conn.on('open', async () => {
       await measureLatency(conn);
-      console.log("Latency:", latency, "Offset:", timeOffset);
     });
 
     conn.on('data', data => handleSync(data));
@@ -152,7 +151,7 @@ function measureLatency(conn) {
   });
 }
 
-// ---- sync handler (FIXED) ----
+// ---- sync handler ----
 function handleSync(data) {
   if (!data) return;
 
@@ -170,8 +169,10 @@ function handleSync(data) {
     };
 
     video.currentTime = targetTime;
-    video.play();
-    lastActionTime = now;
+    video.play().catch(()=>{});
+
+    // 🔑 prevent corrections briefly
+    playLockUntil = now + 1000;
   }
 
   if (data.type === "pause") {
@@ -183,7 +184,6 @@ function handleSync(data) {
 
     video.currentTime = targetTime;
     video.pause();
-    lastActionTime = now;
   }
 
   if (data.type === "seek") {
@@ -199,14 +199,17 @@ function handleSync(data) {
   }
 }
 
-// ---- smooth drift correction (FIXED) ----
+// ---- smooth drift correction (FINAL FIX) ----
 setInterval(() => {
   if (!lastHostState) return;
 
   const now = Date.now();
 
-  // prevent fighting right after play/pause
-  if (now - lastActionTime < 500) return;
+  // 🔑 lock after play
+  if (!video.paused && now < playLockUntil) {
+    video.playbackRate = 1;
+    return;
+  }
 
   const hostNow = now + timeOffset;
   const elapsed = (hostNow - lastHostState.timestamp) / 1000;
@@ -214,28 +217,22 @@ setInterval(() => {
 
   const diff = expectedTime - video.currentTime;
 
-  if (Math.abs(diff) > 0.8) {
+  if (!video.paused) {
+    // 🚫 no seeking while playing unless VERY wrong
+    if (Math.abs(diff) > 1.0) {
+      video.currentTime = expectedTime;
+    } else {
+      let rate = 1 + diff * 0.4;
+      rate = Math.max(0.98, Math.min(1.02, rate));
+      video.playbackRate = rate;
+    }
+    return;
+  }
+
+  // paused → safe to seek
+  if (Math.abs(diff) > 0.05) {
     video.currentTime = expectedTime;
-    video.playbackRate = 1;
-    return;
   }
-
-  if (Math.abs(diff) > 0.25) {
-    video.currentTime += diff * 0.5;
-    video.playbackRate = 1;
-    return;
-  }
-
-  if (Math.abs(diff) > 0.02) {
-    let rate = 1 + diff * 0.5;
-    rate = Math.max(0.97, Math.min(1.03, rate));
-    video.playbackRate = rate;
-  } else {
-    video.playbackRate = 1;
-  }
-
-  if (lastHostState.paused && !video.paused) video.pause();
-  if (!lastHostState.paused && video.paused) video.play();
 
 }, 250);
 
