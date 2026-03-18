@@ -5,26 +5,27 @@
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
-  <h2>Synced Video Player</h2>
+<h2>Synced Video Player</h2>
 
-  <button onclick="createServer()">Host</button>
-  <br><br>
+<button onclick="createServer()">Host</button>
+<br><br>
 
-  Join Code: <input id="joinCode">
-  <button onclick="joinServer()">Join</button>
+Join Code: <input id="joinCode">
+<button onclick="joinServer()">Join</button>
 
-  <h3 id="myId"></h3>
+<h3 id="myId"></h3>
 
-  <video id="video" width="480" controls>
-    <source src="gandalph-sax.mp4" type="video/mp4">
-  </video>
+<video id="video" width="480" controls>
+  <source src="gandalph-sax.mp4" type="video/mp4">
+</video>
 
 <script>
 let peer;
-let conns = []; // all client connections
+let conns = [];
 let isHost = false;
 const video = document.getElementById("video");
 
+// --- Utils ---
 function getJoinCodeFromURL() {
   const params = new URLSearchParams(window.location.search);
   return params.get("join");
@@ -43,22 +44,25 @@ function createServer() {
 
   peer.on('connection', connection => {
     conns.push(connection);
+    connection.on('close', () => { conns = conns.filter(c => c !== connection); });
 
-    // remove closed connections
-    connection.on('close', () => {
-      conns = conns.filter(c => c !== connection);
+    // send current time immediately when new client joins
+    connection.on('open', () => {
+      connection.send({ type: "sync", time: video.currentTime, playing: !video.paused });
     });
   });
 
   setupHostControls();
+
+  // Periodically send time updates for drift correction
+  setInterval(() => {
+    if (!video.paused) sendState("sync");
+  }, 500); // every 0.5s
 }
 
-// broadcast video state to all clients
 function sendState(type) {
-  const data = { type: type, time: video.currentTime };
-  conns.forEach(c => {
-    if (c.open) c.send(data);
-  });
+  const data = { type: type, time: video.currentTime, playing: !video.paused };
+  conns.forEach(c => { if (c.open) c.send(data); });
 }
 
 function setupHostControls() {
@@ -68,7 +72,7 @@ function setupHostControls() {
 }
 
 // ---------------- CLIENT ----------------
-function joinServer(codeOverride=null) {
+function joinServer(codeOverride = null) {
   const id = codeOverride || document.getElementById("joinCode").value;
   if (!id) return;
 
@@ -77,30 +81,41 @@ function joinServer(codeOverride=null) {
   peer.on('open', () => {
     const conn = peer.connect(id);
 
-    conn.on('open', () => {
-      console.log("Connected to host");
-    });
-
+    conn.on('open', () => console.log("Connected to host"));
     conn.on('data', data => handleSync(data));
   });
 }
 
-// handle host commands
+// handle host commands and drift correction
 function handleSync(data) {
   if (!data) return;
 
+  const driftThreshold = 0.2; // seconds
+  const currentTime = video.currentTime;
+
   if (data.type === "play") {
-    video.currentTime = data.time;
-    video.play();
+    if (Math.abs(currentTime - data.time) > driftThreshold) video.currentTime = data.time;
+    if (video.paused) video.play();
   }
 
   if (data.type === "pause") {
     video.currentTime = data.time;
-    video.pause();
+    if (!video.paused) video.pause();
   }
 
   if (data.type === "seek") {
     video.currentTime = data.time;
+  }
+
+  if (data.type === "sync") {
+    // continuous drift correction
+    const diff = data.time - currentTime;
+    if (Math.abs(diff) > driftThreshold) {
+      video.currentTime = data.time;
+    }
+    // optional: pause/play if host changed
+    if (data.playing && video.paused) video.play();
+    if (!data.playing && !video.paused) video.pause();
   }
 }
 
