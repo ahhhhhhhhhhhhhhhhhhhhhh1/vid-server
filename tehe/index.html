@@ -1,21 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Synced Video</title>
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <h2>Synced Video Player</h2>
+
+  <button onclick="createServer()">Host</button>
+  <br><br>
+
+  Join Code: <input id="joinCode">
+  <button onclick="joinServer()">Join</button>
+
+  <h3 id="myId"></h3>
+
+  <video id="video" width="480" controls>
+    <source src="gandalph-sax.mp4" type="video/mp4">
+  </video>
+
 <script>
 let peer;
-let conns = []; // store all client connections
+let conns = []; // all client connections
 let isHost = false;
 const video = document.getElementById("video");
 
+function getJoinCodeFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("join");
+}
+
+// ---------------- HOST ----------------
 function createServer() {
   isHost = true;
   peer = new Peer();
 
   peer.on('open', id => {
     document.getElementById("myId").innerText = "Join Code: " + id;
+    const url = window.location.origin + window.location.pathname + "?join=" + id;
+    document.getElementById("myId").innerText += "\nShare this link: " + url;
   });
 
   peer.on('connection', connection => {
-    conns.push(connection); // save connection
+    conns.push(connection);
 
-    // optional: remove on close
+    // remove closed connections
     connection.on('close', () => {
       conns = conns.filter(c => c !== connection);
     });
@@ -24,6 +53,7 @@ function createServer() {
   setupHostControls();
 }
 
+// broadcast video state to all clients
 function sendState(type) {
   const data = { type: type, time: video.currentTime };
   conns.forEach(c => {
@@ -36,4 +66,52 @@ function setupHostControls() {
   video.addEventListener("pause", () => sendState("pause"));
   video.addEventListener("seeked", () => sendState("seek"));
 }
+
+// ---------------- CLIENT ----------------
+function joinServer(codeOverride=null) {
+  const id = codeOverride || document.getElementById("joinCode").value;
+  if (!id) return;
+
+  peer = new Peer();
+
+  peer.on('open', () => {
+    const conn = peer.connect(id);
+
+    conn.on('open', () => {
+      console.log("Connected to host");
+    });
+
+    conn.on('data', data => handleSync(data));
+  });
+}
+
+// handle host commands
+function handleSync(data) {
+  if (!data) return;
+
+  if (data.type === "play") {
+    video.currentTime = data.time;
+    video.play();
+  }
+
+  if (data.type === "pause") {
+    video.currentTime = data.time;
+    video.pause();
+  }
+
+  if (data.type === "seek") {
+    video.currentTime = data.time;
+  }
+}
+
+// ---------------- AUTO JOIN ----------------
+window.onload = () => {
+  const code = getJoinCodeFromURL();
+  if (code) {
+    document.getElementById("joinCode").value = code;
+    joinServer(code);
+  }
+};
 </script>
+</body>
+</html>
