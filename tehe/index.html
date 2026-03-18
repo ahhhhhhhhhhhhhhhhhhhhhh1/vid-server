@@ -21,11 +21,11 @@ Join Code: <input id="joinCode">
 
 <script>
 let peer;
-let conns = [];
+let conns = []; // all client connections for host
 let isHost = false;
 const video = document.getElementById("video");
 
-// --- Utils ---
+// ---------------- UTILS ----------------
 function getJoinCodeFromURL() {
   const params = new URLSearchParams(window.location.search);
   return params.get("join");
@@ -39,14 +39,14 @@ function createServer() {
   peer.on('open', id => {
     document.getElementById("myId").innerText = "Join Code: " + id;
     const url = window.location.origin + window.location.pathname + "?join=" + id;
-    document.getElementById("myId").innerText += "\nShare this link: " + url;
+    document.getElementById("myId").innerText += "\nShareable Link: " + url;
   });
 
   peer.on('connection', connection => {
     conns.push(connection);
     connection.on('close', () => { conns = conns.filter(c => c !== connection); });
 
-    // send current time immediately when new client joins
+    // Sync new client immediately
     connection.on('open', () => {
       connection.send({ type: "sync", time: video.currentTime, playing: !video.paused });
     });
@@ -54,10 +54,10 @@ function createServer() {
 
   setupHostControls();
 
-  // Periodically send time updates for drift correction
+  // Periodic sync every 0.5s
   setInterval(() => {
     if (!video.paused) sendState("sync");
-  }, 500); // every 0.5s
+  }, 500);
 }
 
 function sendState(type) {
@@ -80,40 +80,35 @@ function joinServer(codeOverride = null) {
 
   peer.on('open', () => {
     const conn = peer.connect(id);
-
     conn.on('open', () => console.log("Connected to host"));
     conn.on('data', data => handleSync(data));
   });
 }
 
-// handle host commands and drift correction
+// ---------------- SYNC LOGIC ----------------
 function handleSync(data) {
   if (!data) return;
 
-  const driftThreshold = 0.2; // seconds
-  const currentTime = video.currentTime;
+  const driftThreshold = 0.05; // seconds
+  const clientTime = video.currentTime;
 
-  if (data.type === "play") {
-    if (Math.abs(currentTime - data.time) > driftThreshold) video.currentTime = data.time;
-    if (video.paused) video.play();
+  // Apply play/pause/seek commands
+  if (data.type === "play" && video.paused) video.play();
+  if (data.type === "pause" && !video.paused) video.pause();
+  if (data.type === "seek") video.currentTime = data.time;
+
+  // Smooth drift correction using playbackRate
+  const diff = data.time - clientTime;
+  if (Math.abs(diff) > driftThreshold) {
+    if (diff > 0.2) video.playbackRate = 1.05;   // slightly faster
+    else if (diff < -0.2) video.playbackRate = 0.95; // slightly slower
+    else video.playbackRate = 1;
+  } else {
+    video.playbackRate = 1;
   }
 
-  if (data.type === "pause") {
-    video.currentTime = data.time;
-    if (!video.paused) video.pause();
-  }
-
-  if (data.type === "seek") {
-    video.currentTime = data.time;
-  }
-
+  // Ensure play/pause matches host during periodic sync
   if (data.type === "sync") {
-    // continuous drift correction
-    const diff = data.time - currentTime;
-    if (Math.abs(diff) > driftThreshold) {
-      video.currentTime = data.time;
-    }
-    // optional: pause/play if host changed
     if (data.playing && video.paused) video.play();
     if (!data.playing && !video.paused) video.pause();
   }
