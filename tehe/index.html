@@ -1,154 +1,149 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Smooth Synced Video with PlaybackRate</title>
+  <title>Synced Video with Latency Compensation</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
-<h2>Synced Video (Smooth Audio)</h2>
+  <h2>Synced Video Player</h2>
 
-<button onclick="createServer()">Host</button><br><br>
+  <button onclick="createServer()">Host</button>
+  <br><br>
 
-Join Code: <input id="joinCode">
-<button id="joinBtn">Join</button>
+  Join Code: <input id="joinCode">
+  <button onclick="joinServer()">Join</button>
 
-<h3 id="myId"></h3>
-<h4 id="status"></h4>
+  <h3 id="myId"></h3>
 
-<video id="video" width="480" controls preload="auto">
-  <source src="gandalph-sax.mp4" type="video/mp4">
-</video>
+  <video id="video" width="480" controls>
+    <source src="gandalph-sax.mp4" type="video/mp4">
+  </video>
 
 <script>
 let peer;
-let conns = [];
+let conns = []; // all client connections
 let isHost = false;
-const video = document.getElementById("video");
-const status = document.getElementById("status");
-
-function log(msg){ status.innerText = msg; }
+let video = document.getElementById("video");
+let latency = 0;
 
 // ---------------- HOST ----------------
-function createServer(){
+function createServer() {
   isHost = true;
   peer = new Peer();
 
-  peer.on('open', id=>{
-    document.getElementById("myId").innerText = "Join Code: "+id;
+  peer.on('open', id => {
+    document.getElementById("myId").innerText = "Join Code: " + id;
     const url = window.location.origin + window.location.pathname + "?join=" + id;
-    document.getElementById("myId").innerText += "\nShare this link: "+url;
+    document.getElementById("myId").innerText += "\nShare this link: " + url;
   });
 
-  peer.on('connection', connection=>{
+  peer.on('connection', connection => {
     conns.push(connection);
-    connection.on('close', ()=>conns = conns.filter(c=>c!==connection));
-    
-    connection.on('data', data=>{
-      if(data.type==='ping') connection.send({type:'pong'});
-      if(data.type==='ready') checkAllReady();
+
+    connection.on('close', () => {
+      conns = conns.filter(c => c !== connection);
     });
 
-    pingClient(connection,5,avgPing=>{ connection.latency = avgPing; });
+    // respond to ping for latency
+    connection.on('data', data => {
+      if (data.type === "ping") {
+        connection.send({ type: "pong", timestamp: data.timestamp });
+      }
+    });
   });
 
   setupHostControls();
-  setInterval(()=>{ if(!video.paused) sendState("sync"); },100);
 }
 
-function setupHostControls(){
-  video.addEventListener("play", ()=>sendState("play"));
-  video.addEventListener("pause", ()=>sendState("pause"));
-  video.addEventListener("seeked", ()=>sendState("seek"));
+function setupHostControls() {
+  video.addEventListener("play", () => broadcastVideo("play"));
+  video.addEventListener("pause", () => broadcastVideo("pause"));
+  video.addEventListener("seeked", () => broadcastVideo("seek"));
 }
 
-function sendState(type){
-  const hostTime = performance.now()/1000;
-  const data = {type:type,time:video.currentTime,hostTime:hostTime,playing:!video.paused};
-  conns.forEach(c=>{ if(c.open)c.send(data); });
+// broadcast video state to all clients with timestamp
+function broadcastVideo(type) {
+  const data = {
+    type: type,
+    time: video.currentTime,
+    timestamp: Date.now() // send host timestamp
+  };
+  conns.forEach(c => { if(c.open) c.send(data); });
 }
 
 // ---------------- CLIENT ----------------
-document.getElementById("joinBtn").onclick = function(){
-  const id = document.getElementById("joinCode").value;
-  if(!id) return;
+function joinServer(codeOverride=null) {
+  const id = codeOverride || document.getElementById("joinCode").value;
+  if (!id) return;
 
   peer = new Peer();
-  peer.on('open', ()=>{
+
+  peer.on('open', () => {
     const conn = peer.connect(id);
-    conn.on('open', ()=>log("Connected to host"));
-    conn.on('data', data=>handleClientData(data, conn));
 
-    pingClient(conn,5,avgPing=>{
-      conn.latency = avgPing;
-      log("Estimated latency: "+avgPing.toFixed(1)+"ms");
-      video.load();
-      video.oncanplaythrough = ()=>{ conn.send({type:'ready'}); };
+    conn.on('open', async () => {
+      console.log("Connected to host");
+      await measureLatency(conn);
     });
-  });
-};
 
-// ---------------- PING ----------------
-function pingClient(conn,count,callback){
-  let total=0,completed=0;
-  function pingOnce(){
-    const start = performance.now();
-    conn.send({type:"ping"});
-    conn.once("data", resp=>{
-      if(resp.type==="pong"){
-        total += performance.now() - start;
-        completed++;
-        if(completed<count) pingOnce();
-        else callback(total/count);
+    conn.on('data', data => handleSync(data));
+  });
+}
+
+// measure latency using ping-pong
+function measureLatency(conn) {
+  return new Promise(resolve => {
+    const start = Date.now();
+    conn.on('data', function onPong(data) {
+      if(data.type === "pong") {
+        latency = (Date.now() - start) / 2; // round-trip / 2
+        console.log("Latency:", latency, "ms");
+        conn.off('data', onPong);
+        resolve();
       }
     });
-  }
-  pingOnce();
+    conn.send({ type: "ping", timestamp: start });
+  });
 }
 
-// ---------------- SYNC WITH PLAYBACKRATE ----------------
-function handleClientData(data, conn){
-  if(!data) return;
-  if(data.type==='ping'){ conn.send({type:'pong'}); return; }
+// handle host commands, adjust for latency
+function handleSync(data) {
+  if (!data) return;
 
-  const latency = conn.latency ? conn.latency/1000 : 0.1;
-  const now = performance.now()/1000;
-  const targetTime = data.time + (now - data.hostTime) - latency;
-  const diff = targetTime - video.currentTime;
+  let targetTime = data.time;
 
-  // Smooth playbackRate correction
-  const maxSpeed = 1.1;   // max 10% faster
-  const minSpeed = 0.9;   // max 10% slower
-  if(Math.abs(diff)>0.05){
-    let rate = 1 + diff*0.5; // scale factor for speed adjustment
-    if(rate>maxSpeed) rate=maxSpeed;
-    if(rate<minSpeed) rate=minSpeed;
-    video.playbackRate = rate;
-  } else {
-    video.playbackRate = 1;
+  if(data.timestamp) {
+    // calculate approx host time + latency
+    const now = Date.now();
+    const delay = now - data.timestamp;
+    targetTime += delay / 1000; // convert ms to seconds
   }
 
-  if(data.type==='play' && video.paused) video.play();
-  if(data.type==='pause' && !video.paused) video.pause();
-  if(data.type==='seek') video.currentTime = targetTime;
-}
-
-// ---------------- PRE-PLAY COUNTDOWN ----------------
-function checkAllReady(){
-  if(!isHost) return;
-  const readyClients = conns.filter(c=>c.latency!==undefined).length;
-  if(readyClients === conns.length){
-    const startTime = performance.now()/1000 + 2; // start 2s in future
-    conns.forEach(c=>c.send({type:'start', time:startTime}));
-    video.currentTime = 0;
-    video.playbackRate = 1;
-    setTimeout(()=>video.play(),2000);
+  if(data.type === "play") {
+    video.currentTime = targetTime;
+    video.play();
+  }
+  if(data.type === "pause") {
+    video.currentTime = targetTime;
+    video.pause();
+  }
+  if(data.type === "seek") {
+    video.currentTime = targetTime;
   }
 }
 
 // ---------------- AUTO JOIN ----------------
-window.onload = ()=>{
-  const code = new URLSearchParams(window.location.search).get("join");
-  if(code) document.getElementById("joinCode").value = code;
+function getJoinCodeFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("join");
+}
+
+window.onload = () => {
+  const code = getJoinCodeFromURL();
+  if (code) {
+    document.getElementById("joinCode").value = code;
+    joinServer(code);
+  }
 };
 </script>
 </body>
