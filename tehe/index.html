@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>High-Precision Synced Video</title>
+  <title>Smoother Synced Video</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
-<h2>Over-Engineered Synced Video Player</h2>
+<h2>Smoother Synced Video Player</h2>
 
 <button onclick="createServer()">Host</button>
 <br><br>
@@ -27,52 +27,46 @@ let isHost = false;
 const video = document.getElementById("video");
 const status = document.getElementById("status");
 
-// ---------------- UTILS ----------------
 function log(msg){ status.innerText = msg; }
 function getJoinCodeFromURL(){ return new URLSearchParams(window.location.search).get("join"); }
 
-// ---------------- HOST ----------------
-function createServer() {
+// --- HOST ---
+function createServer(){
   isHost = true;
   peer = new Peer();
 
-  peer.on('open', id => {
-    document.getElementById("myId").innerText = "Join Code: " + id;
+  peer.on('open', id=>{
+    document.getElementById("myId").innerText = "Join Code: "+id;
     const url = window.location.origin + window.location.pathname + "?join=" + id;
-    document.getElementById("myId").innerText += "\nShare this link: " + url;
+    document.getElementById("myId").innerText += "\nShare this link: "+url;
   });
 
-  peer.on('connection', connection => {
+  peer.on('connection', connection=>{
     conns.push(connection);
-
-    connection.on('close', ()=> conns = conns.filter(c=>c!==connection));
-
-    // network latency test
-    pingClient(connection, 5, avgPing => {
+    connection.on('close', ()=>conns = conns.filter(c=>c!==connection));
+    pingClient(connection,5,avgPing=>{
       connection.latency = avgPing;
-      log("Client latency estimated: " + avgPing.toFixed(1) + "ms");
+      log("Client latency: "+avgPing.toFixed(1)+"ms");
     });
   });
 
   setupHostControls();
-
-  // aggressive periodic sync every 100ms
-  setInterval(()=>{ if(!video.paused) sendState("sync"); }, 100);
+  setInterval(()=>{ if(!video.paused) sendState("sync"); },100);
 }
 
-function setupHostControls() {
-  video.addEventListener("play", ()=> sendState("play"));
-  video.addEventListener("pause", ()=> sendState("pause"));
-  video.addEventListener("seeked", ()=> sendState("seek"));
+function setupHostControls(){
+  video.addEventListener("play", ()=>sendState("play"));
+  video.addEventListener("pause", ()=>sendState("pause"));
+  video.addEventListener("seeked", ()=>sendState("seek"));
 }
 
-function sendState(type) {
-  const hostTime = performance.now()/1000; // high-precision clock
-  const data = { type: type, time: video.currentTime, hostTime: hostTime, playing: !video.paused };
-  conns.forEach(c => { if(c.open) c.send(data); });
+function sendState(type){
+  const hostTime = performance.now()/1000;
+  const data = {type:type,time:video.currentTime,hostTime:hostTime,playing:!video.paused};
+  conns.forEach(c=>{ if(c.open)c.send(data); });
 }
 
-// ---------------- CLIENT ----------------
+// --- CLIENT ---
 function joinServer(codeOverride=null){
   const id = codeOverride || document.getElementById("joinCode").value;
   if(!id) return;
@@ -82,24 +76,22 @@ function joinServer(codeOverride=null){
   peer.on('open', ()=>{
     const conn = peer.connect(id);
     conn.on('open', ()=>log("Connected to host"));
-    conn.on('data', data => handleSync(data, conn));
-    
-    // estimate latency
+    conn.on('data', data=>handleSync(data,conn));
+
     pingClient(conn,5,avgPing=>{
       conn.latency = avgPing;
-      log("Estimated latency to host: " + avgPing.toFixed(1) + "ms");
+      log("Estimated latency: "+avgPing.toFixed(1)+"ms");
     });
   });
 }
 
-// ping test to estimate network latency
-function pingClient(conn, count, callback){
-  let total = 0;
-  let completed = 0;
+// --- PING / LATENCY ---
+function pingClient(conn,count,callback){
+  let total=0,completed=0;
   function pingOnce(){
     const start = performance.now();
-    conn.send({ type: "ping" });
-    conn.once("data", resp=>{
+    conn.send({type:"ping"});
+    conn.once("data",resp=>{
       if(resp.type==="pong"){
         total += performance.now() - start;
         completed++;
@@ -111,33 +103,37 @@ function pingClient(conn, count, callback){
   pingOnce();
 }
 
-// handle host commands
-function handleSync(data, conn){
+// --- SYNC HANDLER ---
+function handleSync(data,conn){
   if(!data) return;
-
-  // respond to ping
   if(data.type==="ping"){ conn.send({type:"pong"}); return; }
 
-  // calculate offset
-  const latency = conn && conn.latency ? conn.latency/1000 : 0.1; // default 100ms if unknown
+  const latency = conn && conn.latency ? conn.latency/1000 : 0.1;
   const now = performance.now()/1000;
-  const offset = (now - data.hostTime) - latency; // time client is behind
-  let targetTime = data.time + offset;
+  const offset = (now - data.hostTime) - latency;
+  const targetTime = data.time + offset;
 
-  // aggressive correction
   const diff = targetTime - video.currentTime;
-  const fastThreshold = 0.1; // 100ms
-  if(Math.abs(diff) > fastThreshold){
-    video.currentTime = targetTime; // snap to catch up fast
+
+  // smooth aggressive correction
+  if(Math.abs(diff) > 0.3){
+    // very far behind, snap
+    video.currentTime = targetTime;
+  } else if(Math.abs(diff) > 0.05){
+    // small drift, adjust playbackRate
+    video.playbackRate = 1 + diff*2; // scales speed slightly
+  } else {
+    // almost synced
+    video.playbackRate = 1;
   }
 
-  // ensure play/pause matches
+  // keep play/pause in sync
   if(data.type==="play" && video.paused) video.play();
   if(data.type==="pause" && !video.paused) video.pause();
   if(data.type==="seek") video.currentTime = targetTime;
 }
 
-// ---------------- AUTO JOIN ----------------
+// --- AUTO JOIN ---
 window.onload = ()=>{
   const code = getJoinCodeFromURL();
   if(code){
