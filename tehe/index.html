@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Synced Video (Final Stable)</title>
+  <title>Synced Video (Stable + Wake Lock)</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
@@ -32,6 +32,36 @@ let latency = 0;
 let timeOffset = 0;
 let lastHostState = null;
 let playLockUntil = 0;
+
+// ---- WAKE LOCK ----
+let wakeLock = null;
+async function enableWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => {
+        console.log('Wake Lock released');
+      });
+      console.log('Wake Lock active');
+    }
+  } catch (err) {
+    console.log('Wake Lock failed:', err);
+  }
+}
+function disableWakeLock() {
+  if (wakeLock) {
+    wakeLock.release();
+    wakeLock = null;
+  }
+}
+video.addEventListener("play", enableWakeLock);
+video.addEventListener("pause", disableWakeLock);
+video.addEventListener("ended", disableWakeLock);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !video.paused) {
+    enableWakeLock();
+  }
+});
 
 // ---------------- HOST ----------------
 function createServer() {
@@ -170,9 +200,7 @@ function handleSync(data) {
 
     video.currentTime = targetTime;
     video.play().catch(()=>{});
-
-    // 🔑 prevent corrections briefly
-    playLockUntil = now + 1000;
+    playLockUntil = now + 1000; // prevent correction for 1s
   }
 
   if (data.type === "pause") {
@@ -181,7 +209,6 @@ function handleSync(data) {
       paused: true,
       timestamp: data.timestamp
     };
-
     video.currentTime = targetTime;
     video.pause();
   }
@@ -199,7 +226,7 @@ function handleSync(data) {
   }
 }
 
-// ---- smooth drift correction (FINAL FIX) ----
+// ---- smooth drift correction ----
 setInterval(() => {
   if (!lastHostState) return;
 
@@ -218,7 +245,6 @@ setInterval(() => {
   const diff = expectedTime - video.currentTime;
 
   if (!video.paused) {
-    // 🚫 no seeking while playing unless VERY wrong
     if (Math.abs(diff) > 1.0) {
       video.currentTime = expectedTime;
     } else {
