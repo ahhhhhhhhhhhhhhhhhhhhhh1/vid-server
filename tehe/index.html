@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Smoother Synced Video</title>
+  <title>Max-Sync Video</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
-<h2>Smoother Synced Video Player</h2>
+<h2>Max-Sync Video Player</h2>
 
 <button onclick="createServer()">Host</button>
 <br><br>
@@ -16,7 +16,7 @@ Join Code: <input id="joinCode">
 <h3 id="myId"></h3>
 <h4 id="status"></h4>
 
-<video id="video" width="480" controls>
+<video id="video" width="480" controls preload="auto">
   <source src="gandalph-sax.mp4" type="video/mp4">
 </video>
 
@@ -27,6 +27,7 @@ let isHost = false;
 const video = document.getElementById("video");
 const status = document.getElementById("status");
 
+// --- UTILS ---
 function log(msg){ status.innerText = msg; }
 function getJoinCodeFromURL(){ return new URLSearchParams(window.location.search).get("join"); }
 
@@ -44,26 +45,20 @@ function createServer(){
   peer.on('connection', connection=>{
     conns.push(connection);
     connection.on('close', ()=>conns = conns.filter(c=>c!==connection));
+
     pingClient(connection,5,avgPing=>{
       connection.latency = avgPing;
       log("Client latency: "+avgPing.toFixed(1)+"ms");
     });
+
+    // respond to ready / ping messages
+    connection.on('data', data=>{
+      if(data.type==='ready') checkAllReady();
+      if(data.type==='ping') connection.send({type:'pong'});
+    });
   });
 
-  setupHostControls();
-  setInterval(()=>{ if(!video.paused) sendState("sync"); },100);
-}
-
-function setupHostControls(){
-  video.addEventListener("play", ()=>sendState("play"));
-  video.addEventListener("pause", ()=>sendState("pause"));
-  video.addEventListener("seeked", ()=>sendState("seek"));
-}
-
-function sendState(type){
-  const hostTime = performance.now()/1000;
-  const data = {type:type,time:video.currentTime,hostTime:hostTime,playing:!video.paused};
-  conns.forEach(c=>{ if(c.open)c.send(data); });
+  log("Host ready. Waiting for clients...");
 }
 
 // --- CLIENT ---
@@ -76,13 +71,39 @@ function joinServer(codeOverride=null){
   peer.on('open', ()=>{
     const conn = peer.connect(id);
     conn.on('open', ()=>log("Connected to host"));
-    conn.on('data', data=>handleSync(data,conn));
+    conn.on('data', data=>handleClientData(data, conn));
 
     pingClient(conn,5,avgPing=>{
       conn.latency = avgPing;
       log("Estimated latency: "+avgPing.toFixed(1)+"ms");
+      waitForVideoLoad(conn);
     });
   });
+}
+
+// --- VIDEO READY ---
+function waitForVideoLoad(conn){
+  video.oncanplaythrough = ()=>{
+    log("Video loaded, sending ready to host...");
+    conn.send({type:'ready'});
+  };
+}
+
+// --- PRE-PLAY COUNTDOWN ---
+function checkAllReady(){
+  if(!isHost) return;
+  const readyClients = conns.filter(c=>c.latency!==undefined).length;
+  if(readyClients === conns.length){
+    // set start 2 seconds in future
+    const startTime = performance.now()/1000 + 2;
+    conns.forEach(c=>{
+      c.send({type:'start', time: startTime});
+    });
+    log("All clients ready. Starting at t+2s");
+    video.currentTime = 0;
+    video.playbackRate = 1;
+    setTimeout(()=>video.play(), 2000);
+  }
 }
 
 // --- PING / LATENCY ---
@@ -103,34 +124,36 @@ function pingClient(conn,count,callback){
   pingOnce();
 }
 
-// --- SYNC HANDLER ---
-function handleSync(data,conn){
+// --- CLIENT SYNC ---
+function handleClientData(data, conn){
   if(!data) return;
-  if(data.type==="ping"){ conn.send({type:"pong"}); return; }
 
-  const latency = conn && conn.latency ? conn.latency/1000 : 0.1;
-  const now = performance.now()/1000;
-  const offset = (now - data.hostTime) - latency;
-  const targetTime = data.time + offset;
+  if(data.type==='ping'){ conn.send({type:'pong'}); return; }
 
-  const diff = targetTime - video.currentTime;
-
-  // smooth aggressive correction
-  if(Math.abs(diff) > 0.3){
-    // very far behind, snap
-    video.currentTime = targetTime;
-  } else if(Math.abs(diff) > 0.05){
-    // small drift, adjust playbackRate
-    video.playbackRate = 1 + diff*2; // scales speed slightly
-  } else {
-    // almost synced
-    video.playbackRate = 1;
+  // start playback at host-specified time
+  if(data.type==='start'){
+    const latency = conn.latency ? conn.latency/1000 : 0.1;
+    const now = performance.now()/1000;
+    const wait = (data.time - now - latency)*1000;
+    log("Starting playback in "+Math.max(0, wait.toFixed(0))+"ms");
+    video.currentTime = 0;
+    setTimeout(()=>video.play(), Math.max(0, wait));
   }
 
-  // keep play/pause in sync
-  if(data.type==="play" && video.paused) video.play();
-  if(data.type==="pause" && !video.paused) video.pause();
-  if(data.type==="seek") video.currentTime = targetTime;
+  // small continuous drift correction
+  if(data.type==='sync'){
+    const latency = conn.latency ? conn.latency/1000 : 0.1;
+    const now = performance.now()/1000;
+    const targetTime = data.time + (now - data.hostTime) - latency;
+    const diff = targetTime - video.currentTime;
+
+    if(Math.abs(diff)>0.3) video.currentTime = targetTime;
+    else if(Math.abs(diff)>0.05) video.playbackRate = 1 + diff*2;
+    else video.playbackRate = 1;
+
+    if(data.playing && video.paused) video.play();
+    if(!data.playing && !video.paused) video.pause();
+  }
 }
 
 // --- AUTO JOIN ---
