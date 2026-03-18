@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>P2P Chat</title>
+  <title>Synced Video</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
-  <h2>P2P Chat</h2>
+  <h2>Synced Video Player</h2>
 
-  <button onclick="createServer()">Create Server</button>
+  <button onclick="createServer()">Host</button>
   <br><br>
 
   Join Code: <input id="joinCode">
@@ -15,19 +15,19 @@
 
   <h3 id="myId"></h3>
 
-  <div id="chat" style="border:1px solid black;height:200px;overflow:auto;"></div>
-  <input id="msg" placeholder="message">
-  <button onclick="sendMsg()">Send</button>
+  <video id="video" width="480" controls>
+    <source src="gandalph-sax.mp4" type="video/mp4">
+  </video>
 
 <script>
 let peer;
 let conn;
+let isHost = false;
 
-function log(msg) {
-  document.getElementById("chat").innerHTML += msg + "<br>";
-}
+const video = document.getElementById("video");
 
 function createServer() {
+  isHost = true;
   peer = new Peer();
 
   peer.on('open', id => {
@@ -36,31 +36,57 @@ function createServer() {
 
   peer.on('connection', connection => {
     conn = connection;
-
-    conn.on('data', data => log("Client: " + data));
+    setupHostControls();
   });
 }
 
 function joinServer() {
-  const id = document.getElementById("joinCode").value;
   peer = new Peer();
+  const id = document.getElementById("joinCode").value;
 
   peer.on('open', () => {
     conn = peer.connect(id);
 
     conn.on('open', () => {
-      log("Connected to server");
+      console.log("Connected to host");
     });
 
-    conn.on('data', data => log("Server: " + data));
+    conn.on('data', data => {
+      handleSync(data);
+    });
   });
 }
 
-function sendMsg() {
-  const msg = document.getElementById("msg").value;
-  if (conn) {
-    conn.send(msg);
-    log("Me: " + msg);
+function setupHostControls() {
+  video.addEventListener("play", () => sendState("play"));
+  video.addEventListener("pause", () => sendState("pause"));
+  video.addEventListener("seeked", () => sendState("seek"));
+}
+
+function sendState(type) {
+  if (!conn) return;
+
+  conn.send({
+    type: type,
+    time: video.currentTime
+  });
+}
+
+function handleSync(data) {
+  if (!data) return;
+
+  if (data.type === "play") {
+    video.currentTime = data.time;
+    video.play();
+  }
+
+  if (data.type === "pause") {
+    video.currentTime = data.time;
+    video.pause();
+  }
+
+  if (data.type === "seek") {
+    video.currentTime = data.time;
   }
 }
 </script>
