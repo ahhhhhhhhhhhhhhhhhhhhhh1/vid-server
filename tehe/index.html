@@ -26,12 +26,21 @@ let isHost = false;
 
 const video = document.getElementById("video");
 
+function getJoinCodeFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("join");
+}
+
 function createServer() {
   isHost = true;
   peer = new Peer();
 
   peer.on('open', id => {
     document.getElementById("myId").innerText = "Join Code: " + id;
+
+    // optional: show shareable link
+    const url = window.location.origin + window.location.pathname + "?join=" + id;
+    document.getElementById("myId").innerText += "\nLink: " + url;
   });
 
   peer.on('connection', connection => {
@@ -40,9 +49,11 @@ function createServer() {
   });
 }
 
-function joinServer() {
+function joinServer(codeOverride=null) {
+  const id = codeOverride || document.getElementById("joinCode").value;
+  if (!id) return;
+
   peer = new Peer();
-  const id = document.getElementById("joinCode").value;
 
   peer.on('open', () => {
     conn = peer.connect(id);
@@ -89,6 +100,15 @@ function handleSync(data) {
     video.currentTime = data.time;
   }
 }
+
+// AUTO JOIN IF URL HAS CODE
+window.onload = () => {
+  const code = getJoinCodeFromURL();
+  if (code) {
+    document.getElementById("joinCode").value = code;
+    joinServer(code);
+  }
+};
 </script>
 </body>
 </html>
