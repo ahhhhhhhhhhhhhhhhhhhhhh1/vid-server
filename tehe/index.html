@@ -8,6 +8,11 @@
   <h2>Synced Video Player</h2>
 
   <button onclick="createServer()">Host</button>
+  <br><br>
+
+  Join Code: <input id="joinCode">
+  <button onclick="joinServer()">Join</button>
+
   <h3 id="myId"></h3>
 
   <video id="video" width="480" controls>
@@ -18,6 +23,7 @@
 let peer;
 let conn;
 let isHost = false;
+
 const video = document.getElementById("video");
 
 function getJoinCodeFromURL() {
@@ -32,6 +38,7 @@ function createServer() {
   peer.on('open', id => {
     document.getElementById("myId").innerText = "Join Code: " + id;
 
+    // optional: show shareable link
     const url = window.location.origin + window.location.pathname + "?join=" + id;
     document.getElementById("myId").innerText += "\nLink: " + url;
   });
@@ -42,11 +49,14 @@ function createServer() {
   });
 }
 
-function joinServer(code) {
+function joinServer(codeOverride=null) {
+  const id = codeOverride || document.getElementById("joinCode").value;
+  if (!id) return;
+
   peer = new Peer();
 
   peer.on('open', () => {
-    conn = peer.connect(code);
+    conn = peer.connect(id);
 
     conn.on('open', () => {
       console.log("Connected to host");
@@ -91,11 +101,12 @@ function handleSync(data) {
   }
 }
 
-// AUTO JOIN ON LOAD IF URL HAS CODE
+// AUTO JOIN IF URL HAS CODE
 window.onload = () => {
   const code = getJoinCodeFromURL();
   if (code) {
-    joinServer(code); // auto-connect immediately
+    document.getElementById("joinCode").value = code;
+    joinServer(code);
   }
 };
 </script>
