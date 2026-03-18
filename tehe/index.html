@@ -1,17 +1,17 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Max-Sync Video</title>
+  <title>Smoother Synced Video</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
-<h2>Max-Sync Video Player</h2>
+<h2>Smoother Synced Video Player</h2>
 
 <button onclick="createServer()">Host</button>
 <br><br>
 
 Join Code: <input id="joinCode">
-<button onclick="joinServer()">Join</button>
+<button id="joinBtn">Join</button>
 
 <h3 id="myId"></h3>
 <h4 id="status"></h4>
@@ -27,11 +27,9 @@ let isHost = false;
 const video = document.getElementById("video");
 const status = document.getElementById("status");
 
-// --- UTILS ---
 function log(msg){ status.innerText = msg; }
-function getJoinCodeFromURL(){ return new URLSearchParams(window.location.search).get("join"); }
 
-// --- HOST ---
+// ---------------- HOST ----------------
 function createServer(){
   isHost = true;
   peer = new Peer();
@@ -45,74 +43,58 @@ function createServer(){
   peer.on('connection', connection=>{
     conns.push(connection);
     connection.on('close', ()=>conns = conns.filter(c=>c!==connection));
-
-    pingClient(connection,5,avgPing=>{
-      connection.latency = avgPing;
-      log("Client latency: "+avgPing.toFixed(1)+"ms");
-    });
-
-    // respond to ready / ping messages
+    
     connection.on('data', data=>{
-      if(data.type==='ready') checkAllReady();
       if(data.type==='ping') connection.send({type:'pong'});
+      if(data.type==='ready') checkAllReady();
     });
+
+    pingClient(connection,5,avgPing=>{ connection.latency = avgPing; });
   });
 
-  log("Host ready. Waiting for clients...");
+  setupHostControls();
+  setInterval(()=>{ if(!video.paused) sendState("sync"); },100);
 }
 
-// --- CLIENT ---
-function joinServer(codeOverride=null){
-  const id = codeOverride || document.getElementById("joinCode").value;
+function setupHostControls(){
+  video.addEventListener("play", ()=>sendState("play"));
+  video.addEventListener("pause", ()=>sendState("pause"));
+  video.addEventListener("seeked", ()=>sendState("seek"));
+}
+
+function sendState(type){
+  const hostTime = performance.now()/1000;
+  const data = {type:type,time:video.currentTime,hostTime:hostTime,playing:!video.paused};
+  conns.forEach(c=>{ if(c.open)c.send(data); });
+}
+
+// ---------------- CLIENT ----------------
+document.getElementById("joinBtn").onclick = function(){
+  const id = document.getElementById("joinCode").value;
   if(!id) return;
 
   peer = new Peer();
-
   peer.on('open', ()=>{
     const conn = peer.connect(id);
     conn.on('open', ()=>log("Connected to host"));
     conn.on('data', data=>handleClientData(data, conn));
-
     pingClient(conn,5,avgPing=>{
       conn.latency = avgPing;
       log("Estimated latency: "+avgPing.toFixed(1)+"ms");
-      waitForVideoLoad(conn);
+      // only now preload video
+      video.load();
+      video.oncanplaythrough = ()=>{ conn.send({type:'ready'}); };
     });
   });
-}
+};
 
-// --- VIDEO READY ---
-function waitForVideoLoad(conn){
-  video.oncanplaythrough = ()=>{
-    log("Video loaded, sending ready to host...");
-    conn.send({type:'ready'});
-  };
-}
-
-// --- PRE-PLAY COUNTDOWN ---
-function checkAllReady(){
-  if(!isHost) return;
-  const readyClients = conns.filter(c=>c.latency!==undefined).length;
-  if(readyClients === conns.length){
-    // set start 2 seconds in future
-    const startTime = performance.now()/1000 + 2;
-    conns.forEach(c=>{
-      c.send({type:'start', time: startTime});
-    });
-    log("All clients ready. Starting at t+2s");
-    video.currentTime = 0;
-    video.playbackRate = 1;
-    setTimeout(()=>video.play(), 2000);
-  }
-}
-
-// --- PING / LATENCY ---
+// ---------------- PING ----------------
 function pingClient(conn,count,callback){
   let total=0,completed=0;
   function pingOnce(){
     const start = performance.now();
     conn.send({type:"ping"});
-    conn.once("data",resp=>{
+    conn.once("data", resp=>{
       if(resp.type==="pong"){
         total += performance.now() - start;
         completed++;
@@ -124,45 +106,42 @@ function pingClient(conn,count,callback){
   pingOnce();
 }
 
-// --- CLIENT SYNC ---
+// ---------------- SYNC ----------------
 function handleClientData(data, conn){
   if(!data) return;
-
   if(data.type==='ping'){ conn.send({type:'pong'}); return; }
 
-  // start playback at host-specified time
-  if(data.type==='start'){
-    const latency = conn.latency ? conn.latency/1000 : 0.1;
-    const now = performance.now()/1000;
-    const wait = (data.time - now - latency)*1000;
-    log("Starting playback in "+Math.max(0, wait.toFixed(0))+"ms");
+  const latency = conn.latency ? conn.latency/1000 : 0.1;
+  const now = performance.now()/1000;
+  const targetTime = data.time + (now - data.hostTime) - latency;
+  const diff = targetTime - video.currentTime;
+
+  if(Math.abs(diff) > 0.3) video.currentTime = targetTime;
+  else if(Math.abs(diff) > 0.05) video.playbackRate = 1 + diff*2;
+  else video.playbackRate = 1;
+
+  if(data.playing && video.paused) video.play();
+  if(!data.playing && !video.paused) video.pause();
+  if(data.type==='seek') video.currentTime = targetTime;
+}
+
+// ---------------- PRE-PLAY COUNTDOWN ----------------
+function checkAllReady(){
+  if(!isHost) return;
+  const readyClients = conns.filter(c=>c.latency!==undefined).length;
+  if(readyClients === conns.length){
+    const startTime = performance.now()/1000 + 2; // 2s in future
+    conns.forEach(c=>c.send({type:'start', time:startTime}));
     video.currentTime = 0;
-    setTimeout(()=>video.play(), Math.max(0, wait));
-  }
-
-  // small continuous drift correction
-  if(data.type==='sync'){
-    const latency = conn.latency ? conn.latency/1000 : 0.1;
-    const now = performance.now()/1000;
-    const targetTime = data.time + (now - data.hostTime) - latency;
-    const diff = targetTime - video.currentTime;
-
-    if(Math.abs(diff)>0.3) video.currentTime = targetTime;
-    else if(Math.abs(diff)>0.05) video.playbackRate = 1 + diff*2;
-    else video.playbackRate = 1;
-
-    if(data.playing && video.paused) video.play();
-    if(!data.playing && !video.paused) video.pause();
+    video.playbackRate = 1;
+    setTimeout(()=>video.play(),2000);
   }
 }
 
-// --- AUTO JOIN ---
+// ---------------- AUTO JOIN ----------------
 window.onload = ()=>{
-  const code = getJoinCodeFromURL();
-  if(code){
-    document.getElementById("joinCode").value = code;
-    joinServer(code);
-  }
+  const code = new URLSearchParams(window.location.search).get("join");
+  if(code) document.getElementById("joinCode").value = code;
 };
 </script>
 </body>
