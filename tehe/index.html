@@ -1,14 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Smoother Synced Video</title>
+  <title>Smooth Synced Video with PlaybackRate</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
-<h2>Smoother Synced Video Player</h2>
+<h2>Synced Video (Smooth Audio)</h2>
 
-<button onclick="createServer()">Host</button>
-<br><br>
+<button onclick="createServer()">Host</button><br><br>
 
 Join Code: <input id="joinCode">
 <button id="joinBtn">Join</button>
@@ -78,10 +77,10 @@ document.getElementById("joinBtn").onclick = function(){
     const conn = peer.connect(id);
     conn.on('open', ()=>log("Connected to host"));
     conn.on('data', data=>handleClientData(data, conn));
+
     pingClient(conn,5,avgPing=>{
       conn.latency = avgPing;
       log("Estimated latency: "+avgPing.toFixed(1)+"ms");
-      // only now preload video
       video.load();
       video.oncanplaythrough = ()=>{ conn.send({type:'ready'}); };
     });
@@ -106,7 +105,7 @@ function pingClient(conn,count,callback){
   pingOnce();
 }
 
-// ---------------- SYNC ----------------
+// ---------------- SYNC WITH PLAYBACKRATE ----------------
 function handleClientData(data, conn){
   if(!data) return;
   if(data.type==='ping'){ conn.send({type:'pong'}); return; }
@@ -116,12 +115,20 @@ function handleClientData(data, conn){
   const targetTime = data.time + (now - data.hostTime) - latency;
   const diff = targetTime - video.currentTime;
 
-  if(Math.abs(diff) > 0.3) video.currentTime = targetTime;
-  else if(Math.abs(diff) > 0.05) video.playbackRate = 1 + diff*2;
-  else video.playbackRate = 1;
+  // Smooth playbackRate correction
+  const maxSpeed = 1.1;   // max 10% faster
+  const minSpeed = 0.9;   // max 10% slower
+  if(Math.abs(diff)>0.05){
+    let rate = 1 + diff*0.5; // scale factor for speed adjustment
+    if(rate>maxSpeed) rate=maxSpeed;
+    if(rate<minSpeed) rate=minSpeed;
+    video.playbackRate = rate;
+  } else {
+    video.playbackRate = 1;
+  }
 
-  if(data.playing && video.paused) video.play();
-  if(!data.playing && !video.paused) video.pause();
+  if(data.type==='play' && video.paused) video.play();
+  if(data.type==='pause' && !video.paused) video.pause();
   if(data.type==='seek') video.currentTime = targetTime;
 }
 
@@ -130,7 +137,7 @@ function checkAllReady(){
   if(!isHost) return;
   const readyClients = conns.filter(c=>c.latency!==undefined).length;
   if(readyClients === conns.length){
-    const startTime = performance.now()/1000 + 2; // 2s in future
+    const startTime = performance.now()/1000 + 2; // start 2s in future
     conns.forEach(c=>c.send({type:'start', time:startTime}));
     video.currentTime = 0;
     video.playbackRate = 1;
