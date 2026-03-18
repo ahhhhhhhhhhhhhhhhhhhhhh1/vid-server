@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Synced Video (Smooth + Accurate)</title>
+  <title>Synced Video (Stable)</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
@@ -31,6 +31,7 @@ let latencySamples = [];
 let latency = 0;
 let timeOffset = 0;
 let lastHostState = null;
+let lastActionTime = 0;
 
 // ---------------- HOST ----------------
 function createServer() {
@@ -151,7 +152,7 @@ function measureLatency(conn) {
   });
 }
 
-// ---- sync handler ----
+// ---- sync handler (FIXED) ----
 function handleSync(data) {
   if (!data) return;
 
@@ -162,13 +163,27 @@ function handleSync(data) {
   const targetTime = data.time + elapsed;
 
   if (data.type === "play") {
+    lastHostState = {
+      time: data.time,
+      paused: false,
+      timestamp: data.timestamp
+    };
+
     video.currentTime = targetTime;
     video.play();
+    lastActionTime = now;
   }
 
   if (data.type === "pause") {
+    lastHostState = {
+      time: data.time,
+      paused: true,
+      timestamp: data.timestamp
+    };
+
     video.currentTime = targetTime;
     video.pause();
+    lastActionTime = now;
   }
 
   if (data.type === "seek") {
@@ -184,42 +199,41 @@ function handleSync(data) {
   }
 }
 
-// ---- smooth drift correction ----
+// ---- smooth drift correction (FIXED) ----
 setInterval(() => {
   if (!lastHostState) return;
 
   const now = Date.now();
-  const hostNow = now + timeOffset;
 
+  // prevent fighting right after play/pause
+  if (now - lastActionTime < 500) return;
+
+  const hostNow = now + timeOffset;
   const elapsed = (hostNow - lastHostState.timestamp) / 1000;
   const expectedTime = lastHostState.time + elapsed;
 
   const diff = expectedTime - video.currentTime;
 
-  // big desync → hard seek
   if (Math.abs(diff) > 0.8) {
     video.currentTime = expectedTime;
     video.playbackRate = 1;
     return;
   }
 
-  // medium desync → small correction
   if (Math.abs(diff) > 0.25) {
     video.currentTime += diff * 0.5;
     video.playbackRate = 1;
     return;
   }
 
-  // small desync → adjust speed
   if (Math.abs(diff) > 0.02) {
     let rate = 1 + diff * 0.5;
-    rate = Math.max(0.97, Math.min(1.03, rate)); // clamp
+    rate = Math.max(0.97, Math.min(1.03, rate));
     video.playbackRate = rate;
   } else {
     video.playbackRate = 1;
   }
 
-  // pause/play sync
   if (lastHostState.paused && !video.paused) video.pause();
   if (!lastHostState.paused && video.paused) video.play();
 
