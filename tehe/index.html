@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>P2P Chat</title>
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <h2>P2P Chat</h2>
+
+  <button onclick="createServer()">Create Server</button>
+  <br><br>
+
+  Join Code: <input id="joinCode">
+  <button onclick="joinServer()">Join</button>
+
+  <h3 id="myId"></h3>
+
+  <div id="chat" style="border:1px solid black;height:200px;overflow:auto;"></div>
+  <input id="msg" placeholder="message">
+  <button onclick="sendMsg()">Send</button>
+
+<script>
+let peer;
+let conn;
+
+function log(msg) {
+  document.getElementById("chat").innerHTML += msg + "<br>";
+}
+
+function createServer() {
+  peer = new Peer();
+
+  peer.on('open', id => {
+    document.getElementById("myId").innerText = "Join Code: " + id;
+  });
+
+  peer.on('connection', connection => {
+    conn = connection;
+
+    conn.on('data', data => log("Client: " + data));
+  });
+}
+
+function joinServer() {
+  const id = document.getElementById("joinCode").value;
+  peer = new Peer();
+
+  peer.on('open', () => {
+    conn = peer.connect(id);
+
+    conn.on('open', () => {
+      log("Connected to server");
+    });
+
+    conn.on('data', data => log("Server: " + data));
+  });
+}
+
+function sendMsg() {
+  const msg = document.getElementById("msg").value;
+  if (conn) {
+    conn.send(msg);
+    log("Me: " + msg);
+  }
+}
+</script>
+</body>
+</html>
