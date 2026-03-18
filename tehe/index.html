@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Synced Video with Latency Compensation</title>
+  <title>Synced Video (Accurate)</title>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
@@ -13,7 +13,7 @@
   Join Code: <input id="joinCode">
   <button onclick="joinServer()">Join</button>
 
-  <h3 id="myId"></h3>
+  <h3 id="info"></h3>
 
   <video id="video" width="480" controls>
     <source src="gandalph-sax.mp4" type="video/mp4">
@@ -21,10 +21,15 @@
 
 <script>
 let peer;
-let conns = []; // all client connections
+let conns = [];
 let isHost = false;
-let video = document.getElementById("video");
+
+const video = document.getElementById("video");
+
+// ---- CLIENT SYNC STATE ----
 let latency = 0;
+let timeOffset = 0;
+let lastHostState = null;
 
 // ---------------- HOST ----------------
 function createServer() {
@@ -32,43 +37,60 @@ function createServer() {
   peer = new Peer();
 
   peer.on('open', id => {
-    document.getElementById("myId").innerText = "Join Code: " + id;
     const url = window.location.origin + window.location.pathname + "?join=" + id;
-    document.getElementById("myId").innerText += "\nShare this link: " + url;
+    document.getElementById("info").innerText =
+      "Join Code: " + id + "\n" + url;
   });
 
-  peer.on('connection', connection => {
-    conns.push(connection);
+  peer.on('connection', conn => {
+    conns.push(conn);
 
-    connection.on('close', () => {
-      conns = conns.filter(c => c !== connection);
+    conn.on('close', () => {
+      conns = conns.filter(c => c !== conn);
     });
 
-    // respond to ping for latency
-    connection.on('data', data => {
+    conn.on('data', data => {
       if (data.type === "ping") {
-        connection.send({ type: "pong", timestamp: data.timestamp });
+        conn.send({
+          type: "pong",
+          hostTime: Date.now()
+        });
       }
     });
   });
 
   setupHostControls();
+  startBeacon();
+}
+
+function broadcast(data) {
+  conns.forEach(c => { if (c.open) c.send(data); });
 }
 
 function setupHostControls() {
-  video.addEventListener("play", () => broadcastVideo("play"));
-  video.addEventListener("pause", () => broadcastVideo("pause"));
-  video.addEventListener("seeked", () => broadcastVideo("seek"));
+  video.addEventListener("play", () => sendState("play"));
+  video.addEventListener("pause", () => sendState("pause"));
+  video.addEventListener("seeked", () => sendState("seek"));
 }
 
-// broadcast video state to all clients with timestamp
-function broadcastVideo(type) {
-  const data = {
-    type: type,
+function sendState(type) {
+  broadcast({
+    type,
     time: video.currentTime,
-    timestamp: Date.now() // send host timestamp
-  };
-  conns.forEach(c => { if(c.open) c.send(data); });
+    timestamp: Date.now()
+  });
+}
+
+// send continuous sync updates (CRITICAL)
+function startBeacon() {
+  setInterval(() => {
+    broadcast({
+      type: "beacon",
+      time: video.currentTime,
+      paused: video.paused,
+      timestamp: Date.now()
+    });
+  }, 1000); // every 1s
 }
 
 // ---------------- CLIENT ----------------
@@ -82,55 +104,102 @@ function joinServer(codeOverride=null) {
     const conn = peer.connect(id);
 
     conn.on('open', async () => {
-      console.log("Connected to host");
       await measureLatency(conn);
+      console.log("Latency:", latency, "Offset:", timeOffset);
     });
 
     conn.on('data', data => handleSync(data));
   });
 }
 
-// measure latency using ping-pong
+// ---- latency + clock sync ----
 function measureLatency(conn) {
   return new Promise(resolve => {
     const start = Date.now();
-    conn.on('data', function onPong(data) {
-      if(data.type === "pong") {
-        latency = (Date.now() - start) / 2; // round-trip / 2
-        console.log("Latency:", latency, "ms");
-        conn.off('data', onPong);
+
+    function handler(data) {
+      if (data.type === "pong") {
+        const end = Date.now();
+
+        latency = (end - start) / 2;
+        timeOffset = data.hostTime - (start + latency);
+
+        conn.off('data', handler);
         resolve();
       }
-    });
-    conn.send({ type: "ping", timestamp: start });
+    }
+
+    conn.on('data', handler);
+
+    conn.send({ type: "ping" });
   });
 }
 
-// handle host commands, adjust for latency
+// ---- sync handler ----
 function handleSync(data) {
   if (!data) return;
 
-  let targetTime = data.time;
+  const now = Date.now();
+  const hostNow = now + timeOffset;
 
-  if(data.timestamp) {
-    // calculate approx host time + latency
-    const now = Date.now();
-    const delay = now - data.timestamp;
-    targetTime += delay / 1000; // convert ms to seconds
-  }
+  const elapsed = (hostNow - data.timestamp) / 1000;
+  const targetTime = data.time + elapsed;
 
-  if(data.type === "play") {
+  if (data.type === "play") {
     video.currentTime = targetTime;
     video.play();
   }
-  if(data.type === "pause") {
+
+  if (data.type === "pause") {
     video.currentTime = targetTime;
     video.pause();
   }
-  if(data.type === "seek") {
+
+  if (data.type === "seek") {
     video.currentTime = targetTime;
   }
+
+  if (data.type === "beacon") {
+    lastHostState = {
+      time: data.time,
+      paused: data.paused,
+      timestamp: data.timestamp
+    };
+  }
 }
+
+// ---- drift correction (smooth + hard snap) ----
+setInterval(() => {
+  if (!lastHostState) return;
+
+  const now = Date.now();
+  const hostNow = now + timeOffset;
+
+  const elapsed = (hostNow - lastHostState.timestamp) / 1000;
+  const expectedTime = lastHostState.time + elapsed;
+
+  const diff = expectedTime - video.currentTime;
+
+  // big desync → snap
+  if (Math.abs(diff) > 0.5) {
+    video.currentTime = expectedTime;
+    return;
+  }
+
+  // small desync → smooth correction
+  if (Math.abs(diff) > 0.05) {
+    video.currentTime += diff * 0.2;
+  }
+
+  // pause/play sync
+  if (lastHostState.paused && !video.paused) {
+    video.pause();
+  }
+  if (!lastHostState.paused && video.paused) {
+    video.play();
+  }
+
+}, 500);
 
 // ---------------- AUTO JOIN ----------------
 function getJoinCodeFromURL() {
